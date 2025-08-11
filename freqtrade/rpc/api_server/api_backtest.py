@@ -114,7 +114,7 @@ def __run_backtest_bg(btconfig: Config):
                         s.get_strategy_name(): s.__file__ for s in ApiBG.bt["bt"].strategylist
                     },
                 )
-                ApiBG.bt["bt"].results["metadata"][strategy_name]["filename"] = str(fn.stem)
+                ApiBG.bt["bt"].results["metadata"][strategy_name]["filename"] = str(fn.name)
                 ApiBG.bt["bt"].results["metadata"][strategy_name]["strategy"] = strategy_name
 
         logger.info("Backtest finished.")

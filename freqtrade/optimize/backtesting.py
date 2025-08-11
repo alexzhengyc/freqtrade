@@ -1837,7 +1837,7 @@ class Backtesting:
             dt_appendix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             if self.config.get("export", "none") in ("trades", "signals"):
                 combined_res = combined_dataframes_with_rel_mean(data, min_date, max_date)
-                store_backtest_results(
+                results_folder = store_backtest_results(
                     self.config,
                     self.results,
                     dt_appendix,
@@ -1845,6 +1845,8 @@ class Backtesting:
                     analysis_results=self.analysis_results,
                     strategy_files={s.get_strategy_name(): s.__file__ for s in self.strategylist},
                 )
+                # Store the results folder for console markdown generation
+                self.results_folder = results_folder
 
         # Results may be mixed up now. Sort them so they follow --strategy-list order.
         if "strategy_list" in self.config and len(self.results) > 0:
@@ -1861,4 +1863,6 @@ class Backtesting:
 
         if len(self.strategylist) > 0:
             # Show backtest results
-            show_backtest_results(self.config, self.results)
+            # Skip console markdown generation if we already created it during storage
+            skip_markdown = hasattr(self, "results_folder") and self.results_folder is not None
+            show_backtest_results(self.config, self.results, skip_console_markdown=skip_markdown)

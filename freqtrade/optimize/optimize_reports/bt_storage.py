@@ -1,8 +1,7 @@
 import logging
-from io import BytesIO, StringIO
+from io import BytesIO
 from pathlib import Path
 from typing import Any
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from pandas import DataFrame
 
@@ -10,8 +9,7 @@ from freqtrade.configuration import sanitize_config
 from freqtrade.constants import LAST_BT_RESULT_FN
 from freqtrade.enums.runmode import RunMode
 from freqtrade.ft_types import BacktestResultType
-from freqtrade.misc import dump_json_to_file, file_dump_json
-from freqtrade.optimize.backtest_caching import get_backtest_metadata_filename
+from freqtrade.misc import file_dump_json
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +54,7 @@ def store_backtest_results(
     strategy_files: dict[str, str] | None = None,
 ) -> Path:
     """
-    Stores backtest results and analysis data in a zip file, with metadata stored separately
+    Stores backtest results and analysis data in a folder structure, with metadata stored separately
     for convenience.
     :param config: Configuration dictionary
     :param stats: Dataframe containing the backtesting statistics
@@ -65,76 +63,85 @@ def store_backtest_results(
     :param analysis_results: Dictionary containing analysis results
     """
     recordfilename: Path = config["exportfilename"]
-    zip_filename = _generate_filename(recordfilename, dtappendix, ".zip")
     base_filename = _generate_filename(recordfilename, dtappendix, "")
-    json_filename = _generate_filename(recordfilename, dtappendix, ".json")
+
+    # Create a folder to store all backtest results
+    folder_name = f"backtest-result-{dtappendix}"
+    if recordfilename.is_dir():
+        results_folder = recordfilename / folder_name
+    else:
+        results_folder = recordfilename.parent / folder_name
+
+    results_folder.mkdir(parents=True, exist_ok=True)
 
     # Store metadata separately with .json extension
-    file_dump_json(get_backtest_metadata_filename(json_filename), stats["metadata"])
+    metadata_file = results_folder / f"{base_filename.stem}.meta.json"
+    file_dump_json(metadata_file, stats["metadata"])
 
     # Store latest backtest info separately
-    latest_filename = Path.joinpath(zip_filename.parent, LAST_BT_RESULT_FN)
-    file_dump_json(latest_filename, {"latest_backtest": str(zip_filename.name)}, log=False)
+    latest_filename = results_folder.parent / LAST_BT_RESULT_FN
+    file_dump_json(latest_filename, {"latest_backtest": str(results_folder.name)}, log=False)
 
-    # Create zip file and add the files
-    with ZipFile(zip_filename, "w", ZIP_DEFLATED) as zipf:
-        # Store stats
-        stats_copy = {
-            "strategy": stats["strategy"],
-            "strategy_comparison": stats["strategy_comparison"],
-        }
-        stats_buf = StringIO()
-        dump_json_to_file(stats_buf, stats_copy)
-        zipf.writestr(json_filename.name, stats_buf.getvalue())
+    # Store stats as JSON file
+    stats_copy = {
+        "strategy": stats["strategy"],
+        "strategy_comparison": stats["strategy_comparison"],
+    }
+    stats_file = results_folder / f"{base_filename.stem}.json"
+    file_dump_json(stats_file, stats_copy)
 
-        config_buf = StringIO()
-        dump_json_to_file(config_buf, sanitize_config(config["original_config"]))
-        zipf.writestr(f"{base_filename.stem}_config.json", config_buf.getvalue())
+    # Store config file
+    config_file = results_folder / f"{base_filename.stem}_config.json"
+    file_dump_json(config_file, sanitize_config(config["original_config"]))
 
-        for strategy_name, strategy_file in (strategy_files or {}).items():
-            # Store the strategy file and its parameters
-            strategy_buf = BytesIO()
-            strategy_path = Path(strategy_file)
-            if not strategy_path.is_file():
-                logger.warning(f"Strategy file '{strategy_path}' does not exist. Skipping.")
-                continue
-            with strategy_path.open("rb") as strategy_file_obj:
-                strategy_buf.write(strategy_file_obj.read())
-            strategy_buf.seek(0)
-            zipf.writestr(f"{base_filename.stem}_{strategy_name}.py", strategy_buf.getvalue())
-            strategy_params = strategy_path.with_suffix(".json")
-            if strategy_params.is_file():
-                strategy_params_buf = BytesIO()
-                with strategy_params.open("rb") as strategy_params_obj:
-                    strategy_params_buf.write(strategy_params_obj.read())
-                strategy_params_buf.seek(0)
-                zipf.writestr(
-                    f"{base_filename.stem}_{strategy_name}.json",
-                    strategy_params_buf.getvalue(),
-                )
+    # Store strategy files and their parameters
+    for strategy_name, strategy_file in (strategy_files or {}).items():
+        strategy_path = Path(strategy_file)
+        if not strategy_path.is_file():
+            logger.warning(f"Strategy file '{strategy_path}' does not exist. Skipping.")
+            continue
 
-        # Add market change data if present
-        if market_change_data is not None:
-            market_change_name = f"{base_filename.stem}_market_change.feather"
-            market_change_buf = BytesIO()
-            market_change_data.reset_index().to_feather(
-                market_change_buf, compression_level=9, compression="lz4"
-            )
-            market_change_buf.seek(0)
-            zipf.writestr(market_change_name, market_change_buf.getvalue())
+        # Copy strategy file
+        strategy_dest = results_folder / f"{base_filename.stem}_{strategy_name}.py"
+        strategy_dest.write_bytes(strategy_path.read_bytes())
 
-        # Add analysis results if present and running in backtest mode
-        if (
-            config.get("export", "none") == "signals"
-            and analysis_results is not None
-            and config.get("runmode", RunMode.OTHER) == RunMode.BACKTEST
-        ):
-            for name in ["signals", "rejected", "exited"]:
-                if name in analysis_results:
-                    analysis_name = f"{base_filename.stem}_{name}.pkl"
-                    analysis_buf = BytesIO()
-                    file_dump_joblib(analysis_buf, analysis_results[name])
-                    analysis_buf.seek(0)
-                    zipf.writestr(analysis_name, analysis_buf.getvalue())
+        # Copy strategy parameters if they exist
+        strategy_params = strategy_path.with_suffix(".json")
+        if strategy_params.is_file():
+            params_dest = results_folder / f"{base_filename.stem}_{strategy_name}.json"
+            params_dest.write_bytes(strategy_params.read_bytes())
 
-    return zip_filename
+    # Add market change data if present
+    if market_change_data is not None:
+        market_change_file = results_folder / f"{base_filename.stem}_market_change.feather"
+        market_change_data.reset_index().to_feather(
+            market_change_file, compression_level=9, compression="lz4"
+        )
+
+    # Add analysis results if present and running in backtest mode
+    if (
+        config.get("export", "none") == "signals"
+        and analysis_results is not None
+        and config.get("runmode", RunMode.OTHER) == RunMode.BACKTEST
+    ):
+        for name in ["signals", "rejected", "exited"]:
+            if name in analysis_results:
+                analysis_file = results_folder / f"{base_filename.stem}_{name}.pkl"
+                analysis_buf = BytesIO()
+                file_dump_joblib(analysis_buf, analysis_results[name])
+                analysis_file.write_bytes(analysis_buf.getvalue())
+
+    # Generate console markdown and visual analysis files in the same folder
+    try:
+        from freqtrade.optimize.optimize_reports.bt_output import write_backtest_console_markdown
+
+        console_files = write_backtest_console_markdown(
+            config, stats, results_folder=results_folder
+        )
+        logger.info(f"Generated {len(console_files)} console markdown and visual analysis files")
+    except Exception as e:
+        logger.warning(f"Failed to generate console markdown and visual analysis: {e}")
+        # Don't let this failure prevent the backtest results from being stored
+
+    logger.info(f"Backtest results stored in folder: {results_folder}")
+    return results_folder
